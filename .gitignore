@@ -1,0 +1,19 @@
+# Build products. Artefacts live outside the tree when the source is on a
+# sync provider — see lib-paths.sh — but never commit local debris anywhere.
+.build/
+build/
+dist/
+*.o
+*.dSYM/
+
+# App bundles produced by build.sh next to the sources.
+DockDeck.app/
+
+# Local scratch
+.DS_Store
+*.log
+/tmp/
+
+# Xcode-adjacent noise if this ever gains a project
+xcuserdata/
+*.xcuserstate
