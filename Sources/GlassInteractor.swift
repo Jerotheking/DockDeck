@@ -23,6 +23,18 @@ final class GlassInteractor {
     private let glow = CAGradientLayer()
     private let glowSize: CGFloat = 320
     private var lastPointer: NSPoint?
+    /// The glow's *presented* position, which approaches the pointer
+    /// exponentially (WS-7: light has inertia — it gathers, it never
+    /// teleports). Nil until first placed.
+    private var smoothed: NSPoint?
+    /// Exponential time-constant for the approach: fast enough to feel welded
+    /// to the pointer on slow moves, slow enough that a fast sweep visibly
+    /// drags the light through the glass.
+    private static let followTau: CFTimeInterval = 0.07
+    /// Within this distance the glow snaps the rest of the way — the tail of
+    /// an exponential approach would otherwise be visible as a permanent
+    /// few-point offset after a sweep stops.
+    private static let snapDistance: CGFloat = 4
     private var appeared = false
 
     init(panel: ShelfPanel) {
@@ -67,8 +79,10 @@ final class GlassInteractor {
         if glow.superlayer == nil {
             hostLayer.insertSublayer(glow, at: 0)
         }
-        if panel.chrome.layer?.animation(forKey: "floatingDrift") == nil {
-            MaterialLayerStyles.setFloatingMotion(on: panel.chrome.layer!)
+        if let chromeLayer = panel.chrome.layer,
+           chromeLayer.animation(forKey: "floatingDriftX") == nil,
+           chromeLayer.animation(forKey: "floatingDriftY") == nil {
+            MaterialLayerStyles.setFloatingMotion(on: chromeLayer)
         }
         // Fade the glow in over a beat — the glass noticing the pointer.
         glow.removeAnimation(forKey: "glowFade")
@@ -80,12 +94,15 @@ final class GlassInteractor {
         fade.fillMode = .backwards
         glow.add(fade, forKey: "glowFade")
         glow.opacity = 1
-        if let lastPointer { moveGlow(to: lastPointer) }
+        // Re-entering resumes from the light's last spot — never a teleport.
+        smoothed = lastPointer
+        if let smoothed { moveGlow(to: smoothed) }
     }
 
     func disappear() {
         appeared = false
-        panel?.chrome.layer?.removeAnimation(forKey: "floatingDrift")
+        panel?.chrome.layer?.removeAnimation(forKey: "floatingDriftX")
+        panel?.chrome.layer?.removeAnimation(forKey: "floatingDriftY")
         let fade = CABasicAnimation(keyPath: "opacity")
         fade.fromValue = glow.presentation()?.opacity ?? 1
         fade.toValue = 0
@@ -95,17 +112,60 @@ final class GlassInteractor {
         glow.opacity = 0
     }
 
+    /// The glow's placement uses the presented position, which is driven by
+    /// `update`; `moveGlow` itself stays immediate so the window-frame hook
+    /// can re-map it during springs without double-easing.
+
     /// The pointer moved: the glow follows it inside the glass.
     func update(point: NSPoint) {
         lastPointer = point
         guard appeared else { return }
-        moveGlow(to: point)
+        // Exponential approach from wherever the light is now to where the
+        // pointer is — using the wall clock, so a burst of mouse-moved events
+        // and one event after a pause advance the light by the same amount.
+        let now = CACurrentMediaTime()
+        if let current = smoothed {
+            let dx = point.x - current.x
+            let dy = point.y - current.y
+            let distance = CGFloat(sqrt(dx * dx + dy * dy))
+            if distance < Self.snapDistance {
+                smoothed = point
+            } else {
+                let lag = lastMotionLag(to: now)
+                let fraction = CGFloat(1 - exp(-lag / Self.followTau))
+                smoothed = NSPoint(x: current.x + dx * fraction, y: current.y + dy * fraction)
+            }
+        } else {
+            smoothed = point
+        }
+        lastMotionTime = now
+        if let smoothed { moveGlow(to: smoothed) }
+    }
+
+    private var lastMotionTime: CFTimeInterval = 0
+    private func lastMotionLag(to now: CFTimeInterval) -> CFTimeInterval {
+        lastMotionTime == 0 ? Self.followTau : max(0, now - lastMotionTime)
     }
 
     /// The window's frame changed (spring, compression, expansion): keep the
     /// glow mapped to the same on-screen spot in the new bounds.
     func viewportChanged() {
-        if let lastPointer { moveGlow(to: lastPointer) }
+        if let smoothed {
+            moveGlow(to: smoothed)
+        } else if let lastPointer {
+            moveGlow(to: lastPointer)
+        }
+    }
+
+    /// Tears the effects down for good — the panel is going away. Not the
+    /// same as `disappear()`, which keeps the layer for the next appearance.
+    func stop() {
+        appeared = false
+        glow.removeAnimation(forKey: "glowFade")
+        glow.removeAnimation(forKey: "glowPulse")
+        glow.removeFromSuperlayer()
+        panel?.chrome.layer?.removeAnimation(forKey: "floatingDriftX")
+        panel?.chrome.layer?.removeAnimation(forKey: "floatingDriftY")
     }
 
     private func moveGlow(to point: NSPoint) {

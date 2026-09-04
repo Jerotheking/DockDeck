@@ -28,6 +28,10 @@ final class ShelfPanel: NSPanel {
     /// passes — the content simply tracks the Dock the way the Dock's own
     /// icons track its magnification.
     let contentScaleHost = NSView()
+    /// The controller whose view lives in `contentScaleHost`, told the moment
+    /// an expansion begins so its content can be present at the first frame
+    /// (WS-2: no empty glass). Weak: the app delegate owns the controller.
+    weak var contentController: ShelfViewController?
     /// The pointer-driven glass interactor. Created lazily on the first
     /// pointer enter so a shelf the pointer never touches costs nothing.
     private var interactor: GlassInteractor?
@@ -39,6 +43,18 @@ final class ShelfPanel: NSPanel {
     private lazy var springs = SpringAnimator(window: self)
     private var collapseWorkItem: DispatchWorkItem?
     private var trackingArea: NSTrackingArea?
+
+    /// Face-growth state for the current expansion (WS-2): the frame the
+    /// growth started from and whether the shelf's length runs vertically.
+    /// Nil whenever the panel is not growing outward from the Dock.
+    private var growthStart: (frame: CGRect, vertical: Bool)?
+    /// Set when the growth's spring completes, so the material is removed
+    /// exactly once even while trailing spring frames keep arriving.
+    private var growthCompletionSeen = false
+    /// False until `init` finishes: AppKit can size the window from inside
+    /// `super.init`, and the per-frame hook must not touch the (lazy) spring
+    /// animator before the panel is fully initialized.
+    private var ready = false
 
     /// Suppresses collapsing while a sheet, menu, editor, or drag owns the shelf.
     var isBusy = false { didSet { if !isBusy { scheduleCollapse() } } }
@@ -83,12 +99,18 @@ final class ShelfPanel: NSPanel {
         contentScaleHost.layer = CALayer()
         contentScaleHost.layer?.anchorPoint = anchorPoint(for: slot)
         chrome.addSubview(contentScaleHost)
+        // The content-inertia transform rides on the *sublayer* transform so
+        // it can never fight the dock-scale host transform (which owns
+        // `layer.transform`): two GPU matrices composed by the compositor,
+        // zero relayout. Written once here so the key always exists.
+        contentScaleHost.layer?.sublayerTransform = CATransform3DIdentity
         applyCornerStyle()
         // Installed up front: a tracking area added *in response to* the first
         // mouseEntered would never see that event. `.activeAlways` keeps the
         // glow working on a panel that never becomes key.
         installPointerArea()
         acceptsMouseMovedEvents = true
+        ready = true
     }
 
     // MARK: - Pointer life (the glass notices you)
@@ -191,7 +213,11 @@ final class ShelfPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 
-    deinit { springs.stop(); collapseWorkItem?.cancel() }
+    deinit {
+        springs.stop()
+        interactor?.stop()
+        collapseWorkItem?.cancel()
+    }
 
     // MARK: - Geometry
 
@@ -262,11 +288,16 @@ final class ShelfPanel: NSPanel {
             return
         }
 
+        stopFaceGrowth()
+
+        guard layout.isViable else {
+            // No room at this end of the Dock. Ordering an unusable window on
+            // screen would be worse than showing nothing.
+            if isVisible { orderOut(nil) }
+            return
+        }
+
         let target = frameForCurrentState()
-        // A hidden shelf's frame is *supposed* to fail the usability check: it
-        // is a deliberate sliver past the screen edge, kept clickable on
-        // purpose. Guarding only visible states means a Dock change while
-        // hidden neither spams the log nor orders out an already-hidden panel.
         if state != .hidden {
             guard ShelfGeometry.isUsable(target, onAnyOf: NSScreen.screens.map(\.frame)) else {
                 NSLog("DockDeck: %@ shelf produced an unusable frame %@; leaving it hidden", slot.rawValue, NSStringFromRect(target))
@@ -298,6 +329,10 @@ final class ShelfPanel: NSPanel {
         case .hidden: return ShelfGeometry.hiddenFrame(from: layout.collapsed, dock: dock)
         }
     }
+
+    /// The content frame to grow *from*: whatever the window shows right now,
+    /// so an expansion that begins mid-transient starts from the real frame.
+    private var currentContentFrame: CGRect { chrome.bounds }
 
     /// Round only the corners that face into the screen; the ones against the
     /// screen edge stay square, exactly as the Dock's own background does.
@@ -342,7 +377,15 @@ final class ShelfPanel: NSPanel {
         state = .expanded
         if !isVisible { orderFrontRegardless() }
         restoreContentScale()
-        springs.animate(to: layout.expanded, parameters: wasHidden ? .reveal : .expand)
+        // WS-2: the content exists *now* — before the window has grown one
+        // point. The controller mounts and renders into the frame the panel
+        // already has, so frame one of the spring shows a full shelf that
+        // grows, never empty glass that is later filled.
+        contentController?.beginExpansionFrom(currentFrame: currentContentFrame)
+        beginFaceGrowth()
+        springs.animate(to: layout.expanded, parameters: wasHidden ? .reveal : .expand) { [weak self] in
+            self?.endFaceGrowth()
+        }
         onStateChange?(state)
     }
 
@@ -350,6 +393,7 @@ final class ShelfPanel: NSPanel {
         guard layout.isViable, state == .expanded else { return }
         collapseWorkItem?.cancel()
         state = .collapsed
+        stopFaceGrowth()
         springs.animate(to: layout.collapsed, parameters: .collapse)
         onStateChange?(state)
     }
@@ -371,6 +415,7 @@ final class ShelfPanel: NSPanel {
         guard layout.isViable, state != .hidden else { return }
         collapseWorkItem?.cancel()
         state = .hidden
+        stopFaceGrowth()
         springs.animate(to: ShelfGeometry.hiddenFrame(from: layout.collapsed, dock: dock), parameters: .collapse)
         onStateChange?(state)
     }
@@ -378,10 +423,110 @@ final class ShelfPanel: NSPanel {
     /// The transform's host tracks the chrome's bounds on every frame change —
     /// springs, transient compressions, expansion. (NSWindow has no layout()
     /// hook worth the name here, and the `layout` property is already taken.)
+    /// Because the spring drives the window through exactly this path once per
+    /// integration step, it doubles as the per-frame motion hook: the content
+    /// inherits the surface's velocity and the Dock-facing face bulges with
+    /// the growth here — one GPU transform per frame, no relayout, no timers.
     override func setFrame(_ frameRect: NSRect, display flag: Bool) {
         super.setFrame(frameRect, display: flag)
         contentScaleHost.frame = chrome.bounds
+        applyContentMotion()
+        updateFaceGrowth()
         interactor?.viewportChanged()
+    }
+
+    // MARK: - Content motion (WS-1: the content has mass)
+
+    /// The shelf's two axes: along the Dock (strip) and into the screen
+    /// (depth). The content-motion mapping is expressed in these terms.
+    private var motionAxes: (strip: ContentMotion.Axis, depth: ContentMotion.Axis) {
+        dock.orientation == .bottom
+            ? (strip: .horizontal, depth: .vertical)
+            : (strip: .vertical, depth: .horizontal)
+    }
+
+    /// Projects the spring's latest motion onto the content: shear along the
+    /// strip, a slight depth squash while pouring outward, and a one-third
+    /// parallax trail. One composed transform per frame on the sublayer, so
+    /// it composes with — and never fights — the dock-scale host transform.
+    private func applyContentMotion() {
+        guard ready else { return }
+        let layer = contentScaleHost.layer
+        guard let layer else { return }
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            if !CATransform3DEqualToTransform(layer.sublayerTransform, CATransform3DIdentity) {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                layer.sublayerTransform = CATransform3DIdentity
+                CATransaction.commit()
+            }
+            return
+        }
+        let sample = springs.motion
+        let t = sample == .zero
+            ? ContentMotion.Transform.identity
+            : ContentMotion.resolve(sample: sample, strip: motionAxes.strip, depth: motionAxes.depth)
+        let m = ContentMotion.makeTransform(t)
+        guard !CATransform3DEqualToTransform(layer.sublayerTransform, m) else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.sublayerTransform = m
+        CATransaction.commit()
+    }
+
+    // MARK: - Face growth (WS-2: the material stretches with the window)
+
+    private func beginFaceGrowth() {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        growthStart = (frame: frame, vertical: dock.orientation != .bottom)
+        growthCompletionSeen = false
+    }
+
+    /// Progress of the outward growth, 0…1, from the spring's own frames —
+    /// the bulge stays welded to the actual motion, never runs on its own clock.
+    private var growthFraction: CGFloat {
+        guard let start = growthStart else { return 0 }
+        let startDepth: CGFloat
+        let nowDepth: CGFloat
+        switch dock.orientation {
+        case .bottom: startDepth = start.frame.height; nowDepth = frame.height
+        case .left, .right: startDepth = start.frame.width; nowDepth = frame.width
+        }
+        let grown = nowDepth - startDepth
+        guard grown > 0 else { return 0 }
+        let targetDepth = dock.orientation == .bottom ? layout.expanded.height : layout.expanded.width
+        return min(1, grown / max(1, targetDepth - startDepth))
+    }
+
+    private func updateFaceGrowth() {
+        guard growthStart != nil, !growthCompletionSeen else { return }
+        guard let chromeLayer = chrome.layer else { return }
+        MaterialLayerStyles.setFaceGrowth(chromeLayer, fraction: growthFraction, verticalLongAxis: growthStart!.vertical)
+    }
+
+    /// Springs settle a few epsilon frames after the completion fires; this
+    /// defers the identity restore until the last frame, so the material is
+    /// never seen snapping back a frame ahead of the window.
+    private func endFaceGrowth() {
+        guard growthCompletionSeen == false else { return }
+        growthCompletionSeen = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.growthCompletionSeen else { return }
+            self.growthStart = nil
+            self.growthCompletionSeen = false
+            if let chromeLayer = self.chrome.layer {
+                MaterialLayerStyles.removeFaceGrowth(chromeLayer)
+            }
+        }
+    }
+
+    private func stopFaceGrowth() {
+        guard growthStart != nil else { return }
+        growthStart = nil
+        growthCompletionSeen = false
+        if let chromeLayer = chrome.layer {
+            MaterialLayerStyles.removeFaceGrowth(chromeLayer)
+        }
     }
 
     func reveal() {

@@ -30,9 +30,6 @@ final class ShelfViewController: NSViewController, NSSearchFieldDelegate {
     weak var panel: ShelfPanel?
 
     private var presentation: ShelfPanel.State = .collapsed
-    /// Bumped on every presentation change, so a fade scheduled for an
-    /// expansion that has already been collapsed again never runs.
-    private var presentationGeneration = 0
     private var stripIsVertical = true
     private var tileSize: CGFloat = 39
 
@@ -271,9 +268,14 @@ final class ShelfViewController: NSViewController, NSSearchFieldDelegate {
 
     /// Crossfade rather than reflow. The two layouts have nothing in common, so
     /// animating between them would show a frame of collapsed-width rows.
+    ///
+    /// WS-2 rewrote the *expansion* leg: the panel calls `beginExpansionFrom`
+    /// before its spring starts, so the expanded layout is mounted, rendered,
+    /// and fully opaque at the spring's first frame — content grows with the
+    /// glass instead of arriving after it. The old 80 ms delay + fade produced
+    /// the "empty drawer" frame the audit measured (B3). Collapse keeps a
+    /// short fade: disappearing content may soften, appearing content may not.
     private func applyPresentation(animated: Bool) {
-        presentationGeneration += 1
-        let generation = presentationGeneration
         let expanded = presentation == .expanded
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
 
@@ -287,40 +289,45 @@ final class ShelfViewController: NSViewController, NSSearchFieldDelegate {
             return
         }
 
+        if expanded {
+            // WS-2, frame one: fully present. The arrivals carry all the
+            // entrance motion — content fading in *while* growing reads as
+            // two clocks anyway.
+            collapsedHost.isHidden = true
+            collapsedHost.alphaValue = 0
+            expandedContainer.alphaValue = 1
+            animateRowArrivals()
+            return
+        }
+
         collapsedHost.isHidden = false
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.16
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             context.allowsImplicitAnimation = true
-            collapsedHost.animator().alphaValue = expanded ? 0 : 1
-            if !expanded { expandedContainer.animator().alphaValue = 0 }
+            collapsedHost.animator().alphaValue = 1
+            expandedContainer.animator().alphaValue = 0
         } completionHandler: { [weak self] in
             guard let self else { return }
-            let stillExpanded = self.presentation == .expanded
-            self.collapsedHost.isHidden = stillExpanded
-            if !stillExpanded { self.unmountExpanded() }
-        }
-
-        // The surface moves first; the contents follow a beat later. The spring
-        // overshoots outward and settles while the rows are still arriving,
-        // which is what makes the expansion read as the shelf pouring out of
-        // the Dock instead of two layers sliding in lockstep.
-        if expanded {
-            expandedContainer.alphaValue = 0
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
-                guard let self, generation == self.presentationGeneration else { return }
-                NSAnimationContext.runAnimationGroup { context in
-                    context.duration = 0.24
-                    context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                    self.expandedContainer.animator().alphaValue = 1
-                }
-                // Rows dispense outward: each arrives from the Dock-facing edge
-                // a beat after its predecessor, with the springy travel+scale
-                // entrance. Guarded on the generation so a fast collapse can
-                // never leave an arrival running on detached rows.
-                animateRowArrivals()
+            if self.presentation != .expanded {
+                self.collapsedHost.isHidden = false
+                self.unmountExpanded()
             }
         }
+    }
+
+    /// Called by the panel *before* its expansion spring takes its first
+    /// step (WS-2): adopt the frame the shelf has right now, mount the
+    /// expanded layout, and render it — so when the window's next frame
+    /// arrives the content is already there. Also bypasses the reload()
+    /// presentation guard so a transition queued inside the spring's first
+    /// frame can never blank the list again.
+    func beginExpansionFrom(currentFrame: CGRect) {
+        presentation = .expanded
+        expandedContainer.frame = currentFrame
+        mountExpanded()
+        lastRenderedKey = "" // force the next reload to run
+        reload(force: true)
     }
 
     /// Staggered spring entrance for the expanded list: rows travel in from

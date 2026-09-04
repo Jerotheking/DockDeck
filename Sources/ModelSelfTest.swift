@@ -407,6 +407,60 @@ enum ModelSelfTest {
                "reveal spring damping is in a sensible range")
         expect(SpringParameters.collapse.response <= reveal.response,
                "collapse is the snappier motion")
+        contentMotionMapping()
+    }
+
+    /// WS-1: the content-motion mapping's boundaries — the taste limits that
+    /// keep inertia felt but never jelly. Pure: no window, no runloop.
+    private static func contentMotionMapping() {
+        // Identity when there is no motion.
+        expect(ContentMotion.resolve(sample: .zero, strip: .vertical, depth: .horizontal).isIdentity,
+               "a motionless spring yields an identity content transform")
+
+        // Shear: signed, proportional, and hard-clamped at maxSkew. Depth is
+        // horizontal here, so depth velocity rides the width component.
+        let slow = ContentMotion.resolve(sample: .init(displacement: .zero, velocity: CGSize(width: 350, height: 0)),
+                                         strip: .vertical, depth: .horizontal)
+        expect(slow.shear > 0 && slow.shear < ContentMotion.maxSkew,
+               "a quarter-speed depth velocity produces a proportional shear below the clamp")
+        let fast = ContentMotion.resolve(sample: .init(displacement: .zero, velocity: CGSize(width: 4000, height: 0)),
+                                         strip: .vertical, depth: .horizontal)
+        expect(fast.shear == ContentMotion.maxSkew,
+               "an extreme velocity clamps the shear at the taste ceiling")
+        let reversed = ContentMotion.resolve(sample: .init(displacement: .zero, velocity: CGSize(width: -700, height: 0)),
+                                             strip: .vertical, depth: .horizontal)
+        expect(reversed.shear < 0,
+               "the shear is signed: travel the other way, lean the other way")
+
+        // Squash: only while moving outward on the depth axis, bounded.
+        let outward = ContentMotion.resolve(sample: .init(displacement: .zero, velocity: CGSize(width: 3000, height: 0)),
+                                            strip: .vertical, depth: .horizontal)
+        expect(outward.depthScale == 1 - ContentMotion.maxSquash,
+               "full outbound depth velocity squashes by exactly the ceiling")
+        let inward = ContentMotion.resolve(sample: .init(displacement: .zero, velocity: CGSize(width: -3000, height: 0)),
+                                           strip: .vertical, depth: .horizontal)
+        expect(inward.depthScale == 1,
+               "inbound depth velocity never stretches the depth axis")
+
+        // Parallax: content trails the window by exactly one third. Tolerance,
+        // not equality: the ratio is 1/3, which binary floats only approximate.
+        let drifting = ContentMotion.resolve(sample: .init(displacement: CGSize(width: 0, height: 30), velocity: .zero),
+                                             strip: .vertical, depth: .horizontal)
+        expect(abs(drifting.offset.height + 10) < 0.0001,
+               "content trails the frame's displacement by exactly the parallax ratio")
+        expect(drifting.shear == 0 && drifting.depthScale == 1,
+               "pure displacement produces no shear and no squash")
+
+        // The transform is built in the documented order: translation, then
+        // shear (m21), then depth scale (m22).
+        let m = ContentMotion.makeTransform(.init(shear: 0.02, depthScale: 0.98, offset: CGSize(width: -3, height: 2)))
+        expect(m.m21 == 0.02 && m.m22 == 0.98 && m.m41 == -3 && m.m42 == 2,
+               "the content transform composes translation, shear, and squash in that order")
+
+        // Boundaries are sane constants.
+        expect(ContentMotion.maxSkew < 0.05, "the skew ceiling stays under 3 degrees")
+        expect(ContentMotion.maxSquash <= 0.06, "the squash ceiling stays subtle")
+        expect(ContentMotion.parallax < 1, "content trails by less than the window moves")
     }
 
     private static func dockReadingStability() {

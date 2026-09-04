@@ -4,6 +4,48 @@
 
 First build of DockDeck that actually appears on screen.
 
+### Changed — build 11: WS-2 + WS-1, the expansion morph and content inertia
+
+Implements the "wow" pair from `DESIGN_THINKING.md` — the shelf grows as one
+piece of glass, and its content has mass.
+
+- **Frame one of an expansion is a full shelf.** The panel now tells its
+  controller *before* the spring's first step (`beginExpansionFrom`); the
+  expanded layout mounts and renders into the frame the shelf already has, so
+  content grows with the glass instead of arriving after it. The old 80 ms
+  delay + fade — the audit's "empty drawer" measurement (B3) — is gone, along
+  with the generation-guarded fade machinery. Collapsing keeps its short
+  fade: disappearing content may soften, appearing content may not.
+- **The material stretches with the window (face growth).** During the
+  outward growth, the chrome layer scales ~4.5% along the shelf's long axis,
+  driven by the spring's own per-frame progress (no second clock), and eases
+  back exactly when the last spring frame lands — the glass reads as one
+  piece deforming, not a rectangle completing a tween.
+- **The content inherits the surface's motion (WS-1).** The spring animator
+  now publishes its per-step motion (`MotionSample`), and a pure, tested
+  mapping (`ContentMotion`) turns it into one GPU transform per frame on the
+  content host's *sublayer* — so it composes with, and never fights, the
+  Dock-scale transform. Shear along the strip is signed and hard-clamped at
+  ~2.5°, the depth axis squashes ≤ 5% only while pouring outward, and the
+  content trails the window's displacement by exactly one third. Mass, not
+  jelly — and structurally impossible to exceed the taste limits, because the
+  model suite pins every boundary (12 new checks; suite now 200).
+- **The glow has inertia (WS-7).** The specular bloom no longer teleports to
+  the pointer: it approaches exponentially (τ = 70 ms, wall-clock based so
+  event bursts and pauses advance it identically), snaps the last few points,
+  and resumes from its last spot on re-enter. The perpetual float now runs
+  two incommensurable periods (5.3 s × 7.1 s), so the composite drift never
+  resolves into a loop the eye can learn.
+- **Fixed a latent CPU runaway in the recents shelf** (found burning ~270%
+  with RSS past 1.2 GB on a real machine during build 11's verification).
+  `SmartSectionResolver` recursively walked *all* of ~/Downloads and called
+  `standardizedFileURL` per file — which performs a reachability syscall per
+  entry (`faccessat`, confirmed in a `sample` capture) — on a 20 s timer and
+  on every Downloads change, stacking passes. It now scans top level only,
+  prefetches resource values in the enumerator's single pass, caps any scan
+  at 8k/20k entries, and materializes `ShelfItem`s only for the newest ones.
+  Idle CPU is 0.0% again with stable memory.
+
 ### Fixed — build 10: WS-0, the coalesced reading pipeline
 
 Implements WS-0 from `DESIGN_THINKING.md` — the fix that unlocks every other
