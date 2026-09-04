@@ -27,6 +27,7 @@ enum ModelSelfTest {
         placementGeometry()
         springParameters()
         dockReadingStability()
+        decisionCore()
         transientGeometry()
         renameValidation()
         try archivePreconditions()
@@ -36,7 +37,7 @@ enum ModelSelfTest {
             failures.forEach { FileHandle.standardError.write(Data("FAIL: \($0)\n".utf8)) }
             throw Failure(message: "\(failures.count) of \(checks) checks failed")
         }
-        print("DockDeck model self-test: PASS (\(checks) checks — store, persistence, settings, migration, dock geometry, springs, rename, archive, safe removal)")
+        print("DockDeck model self-test: PASS (\(checks) checks — store, persistence, settings, migration, dock geometry, promotion core, springs, rename, archive, safe removal)")
     }
 
     // MARK: - Store
@@ -476,6 +477,88 @@ enum ModelSelfTest {
         expect(ShelfGeometry.layout(slot: .leading, dock: resized).collapsed.height
                > ShelfGeometry.layout(slot: .leading, dock: resting).collapsed.height,
                "a smaller Dock yields a taller gap and shelf")
+    }
+
+    /// The promotion decision core: pure, driven here without a runloop.
+    /// This is the WS-0 contract from DESIGN_THINKING.md: at most one report
+    /// per evaluation, promotion by repetition instead of timer cascades, and
+    /// pointer-off size-only readings adopted instantly.
+    private static func decisionCore() {
+        let resting = referenceDock()
+        // Magnified frame: same everything, larger height (size-only change).
+        let magnified = DockGeometry(frame: CGRect(x: 3387, y: 13, width: 53, height: 1384),
+                                     orientation: .right, autohides: true,
+                                     screen: resting.screen, source: .accessibility)
+        let half = DockGeometry(frame: CGRect(x: 3387, y: 200, width: 53, height: 1000),
+                                orientation: .right, autohides: true,
+                                screen: resting.screen, source: .accessibility)
+
+        // Identical reading → idle, and clears any pending candidate.
+        var state = DockWatcher.PromotionState(accepted: resting)
+        state.candidate = half
+        expect(DockWatcher.fold(&state, reading: resting, pointerOnDock: true) == .idle,
+               "a reading equal to the accepted geometry decides nothing")
+        expect(state.candidate == nil,
+               "returning to the accepted geometry clears a stale candidate")
+
+        // Structural → adopt immediately, candidate and count reset.
+        let toggled = DockGeometry(frame: resting.frame, orientation: .right, autohides: false,
+                                   screen: resting.screen, source: .accessibility)
+        state = DockWatcher.PromotionState(accepted: resting)
+        state.candidate = magnified
+        state.repeatedReadings = 1
+        if case .adopt = DockWatcher.fold(&state, reading: toggled, pointerOnDock: true) {} else {
+            expect(false, "an auto-hide change adopts immediately without confirmation")
+        }
+        expect(state.candidate == nil && state.repeatedReadings == 0,
+               "adoption clears the candidate and the repetition count")
+
+        // Size-only under the pointer: transient until the reading repeats.
+        state = DockWatcher.PromotionState(accepted: resting)
+        if case .offerTransient(let d) = DockWatcher.fold(&state, reading: magnified, pointerOnDock: true) {
+            expect(d == magnified, "the transient offer carries the reading being held")
+        } else {
+            expect(false, "a first size-only reading under the pointer is transient, not adopted")
+        }
+        expect(state.candidate == magnified && state.repeatedReadings == 1,
+               "the first size-only reading becomes the promotion candidate")
+
+        // The animation breathing through a different frame does not adopt:
+        // each new shape restarts the count at one.
+        if case .offerTransient = DockWatcher.fold(&state, reading: half, pointerOnDock: true) {} else {
+            expect(false, "a new size-only shape is also transient")
+        }
+        expect(state.candidate == half && state.repeatedReadings == 1,
+               "a different size-only shape restarts the count at one")
+
+        // Magnification unwinding returns to the accepted geometry: idle, and
+        // the stale candidate is gone.
+        expect(DockWatcher.fold(&state, reading: resting, pointerOnDock: true) == .idle,
+               "the unwound animation is idle")
+        expect(state.candidate == nil, "the unwind clears the held candidate")
+
+        // Repetition promotes: the Dock stopped breathing.
+        state = DockWatcher.PromotionState(accepted: resting)
+        if case .offerTransient = DockWatcher.fold(&state, reading: magnified, pointerOnDock: true) {} else {
+            expect(false, "the pre-quorum reading is transient")
+        }
+        if case .adopt(let adopted) = DockWatcher.fold(&state, reading: magnified, pointerOnDock: true) {
+            expect(adopted == magnified, "the repeated reading is adopted as resting geometry")
+        } else {
+            expect(false, "a repeated size-only reading promotes at quorum")
+        }
+        expect(state.accepted == magnified && state.candidate == nil && state.repeatedReadings == 0,
+               "promotion rewrites the accepted geometry and clears the model")
+
+        // Size-only with the pointer elsewhere: a real resize, adopted at once
+        // (magnification happens only under the pointer).
+        state = DockWatcher.PromotionState(accepted: resting)
+        if case .adopt = DockWatcher.fold(&state, reading: magnified, pointerOnDock: false) {} else {
+            expect(false, "a size-only reading without the pointer on the Dock is a real resize")
+        }
+
+        // Promotion quorum is exactly two.
+        expect(DockWatcher.promotionQuorum == 2, "promotion needs the reading twice, not more")
     }
 
     /// The liquid-follow geometry: content scaling for transient readings, and

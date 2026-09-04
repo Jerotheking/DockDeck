@@ -4,6 +4,28 @@
 
 First build of DockDeck that actually appears on screen.
 
+### Fixed — build 10: WS-0, the coalesced reading pipeline
+
+Implements WS-0 from `DESIGN_THINKING.md` — the fix that unlocks every other
+motion workstream and kills the build 9 CPU runaway.
+
+- **One evaluation per frame, never one per notification.** Every dirty mark
+  (push sensor, screen/workspace/prefchange events, pointer, poll backstop)
+  funnels into a single scheduled evaluation never closer than 33 ms apart.
+  A hundred Dock notifications during magnification now cost one synchronous
+  AX read, not a hundred — the main thread is sovereign again.
+- **The decision is a pure, tested core.** `DockWatcher.fold(_:reading:...)
+  replaces the `asyncAfter` confirmation cascade: a size-only reading becomes
+  resting geometry when it *repeats* (the Dock stopped breathing, quorum of
+  two coalesced readings) or the pointer is off the Dock, whichever comes
+  first. At most one `onChange` per evaluation — the double-report that caused
+  first-frame micro-jerk is structurally impossible now.
+- **Re-entrancy guarded.** An event landing mid-evaluation schedules the next
+  tick instead of recursing; a mid-evaluation read can never re-enter.
+- **Idle CPU is 0.0%** (was: runaway to full core). 188/188 model checks
+  (11 new on the promotion core), 20/20 runtime, installed and verified as
+  build 10.
+
 ### Changed — build 9: snappy tracking + much richer motion
 
 - **Size tracking is genuinely snappy.** The watcher's pointer throttle is

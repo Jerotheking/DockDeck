@@ -22,7 +22,9 @@ import ApplicationServices
 /// owns it end-to-end and forwards every event as a single closure.
 final class DockSensor {
     /// Called on the main run loop whenever the Dock's accessibility tree
-    /// reports any change. Cheap enough to call `DockGeometry.current()` inside.
+    /// reports any change. The callback must stay free of AX reads — it only
+    /// marks the watcher dirty; the coalescer schedules the measurement, so a
+    /// notification storm costs one evaluation, not one per event.
     var onEvent: (() -> Void)?
 
     private var observer: AXObserver?

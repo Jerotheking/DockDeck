@@ -3,26 +3,20 @@ import AppKit
 /// Notices when the Dock moves, resizes, or changes item count, and when the
 /// display arrangement changes.
 ///
-/// Three layers, fastest first:
+/// Architecture — the runloop is sovereign, decisions are pure:
 ///
-/// 1. **`DockSensor`** — an `AXObserver` attached to the Dock process itself.
-///    The Dock's *own* window and item-list notifications are the only signal
-///    that fires for every change the Dock undergoes: position, orientation,
-///    auto-hide reveal, magnification, divider drags, tile additions. This is
-///    push, not inference.
-/// 2. **Event inference** — screen-parameter changes, workspace launches and
-///    quits, `com.apple.dock.prefchanged`, and pointer movement (the Dock only
-///    magnifies while the pointer is on it). These still matter: the sensor
-///    cannot run without the Accessibility grant, and prefchange fires before
-///    the Dock has finished relaying out.
-/// 3. **Confirmation poll** — a slow backstop that also re-attaches the
-///    sensor if the Dock relaunched or its elements died.
-///
-/// Every differing reading is reported — never frozen out — because a shelf
-/// that stands still while the Dock grows is a shelf the Dock draws over. The
-/// watcher classifies: size-only changes are transient (hug the edge), any
-/// change in position/orientation/screen/auto-hide/tile-size is structural
-/// (re-place now).
+/// 1. **`DockSensor`** — an `AXObserver` attached to the Dock process. Its
+///    callbacks do nothing but mark the watcher dirty: no AX reads, no work.
+/// 2. **Coalesced evaluation** — every dirty-mark funnels into *one* scheduled
+///    evaluation, never closer than `coalesceInterval` (33 ms ≈ one frame)
+///    apart. A burst of a hundred Dock notifications costs one evaluation and
+///    one AX read, not a hundred. This is where the CPU runaway died.
+/// 3. **The decision core** (`fold(_:reading:pointerOnDock:)`) — a pure
+///    function from (state, reading, pointer) to a decision. It replaces the
+///    old `asyncAfter` confirmation cascade: a size-only reading becomes the
+///    resting geometry when it *repeats* (the Dock stopped breathing) or the
+///    pointer is not on the Dock (magnification only happens under the
+///    pointer), whichever comes first. At most one `onChange` per evaluation.
 final class DockWatcher {
     struct Reading: Equatable {
         let dock: DockGeometry
@@ -38,37 +32,14 @@ final class DockWatcher {
     private var workspaceObservers: [NSObjectProtocol] = []
     private var pollTimer: Timer?
     private var pointerMonitors: [Any] = []
-    /// A size-only reading waiting for confirmation as the new resting geometry.
-    private var pendingReading: DockGeometry?
-    /// Rate limit for pointer-driven re-evaluation. Zero on purpose: the
-    /// pointer path is what makes magnification follow when the push sensor is
-    /// not running, and mouse-moved events land at most once per hardware
-    /// event — throttling them only added visible lag between the Dock's own
-    /// icons and the shelf. (The guard stays for future tuning; the value is
-    /// the fix.)
-    private var lastEvaluation = Date.distantPast
-    private static let pointerThrottle: TimeInterval = 0
-    /// How long a size-only reading is given to repeat itself before it is
-    /// promoted to resting geometry. Short on purpose: the promotion only
-    /// rebuilds tiles, and the geometry itself was already applied live, so
-    /// the user-visible effect of confirming early is nil and the benefit is
-    /// a resting state that settles in the same beat as the Dock's animation.
-    private static let confirmDelay: TimeInterval = 0.15
-    /// Backstop poll for changes nothing else observes — and the sensor's
-    /// health check. The event net is primary; this just keeps drift from
-    /// outliving a few seconds.
-    private static let pollInterval: TimeInterval = 1.5
-
-    /// The push sensor. Nil only before `start()`; inert (start() returning
-    /// false) whenever Accessibility is not granted, in which case the older
-    /// inference layers carry tracking exactly as before.
     private let sensor = DockSensor()
 
-    /// Whether the AXObserver push path is live right now. False simply means
-    /// no Accessibility grant yet — tracking still works, just inferred.
     var isSensorAttached: Bool { sensor.isHealthy }
 
-    init() { current = DockGeometry.current() }
+    init() {
+        current = DockGeometry.current()
+        state = PromotionState(accepted: current)
+    }
 
     deinit { stop() }
 
@@ -76,7 +47,7 @@ final class DockWatcher {
         stop()
         let center = NotificationCenter.default
         observers.append(center.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
-                                            object: nil, queue: .main) { [weak self] _ in self?.refresh(afterDelay: Self.confirmDelay) })
+                                            object: nil, queue: .main) { [weak self] _ in self?.requestEvaluation() })
 
         let workspace = NSWorkspace.shared.notificationCenter
         // Launching or quitting an app adds or removes a Dock tile, which moves
@@ -85,31 +56,28 @@ final class DockWatcher {
                      NSWorkspace.didTerminateApplicationNotification,
                      NSWorkspace.activeSpaceDidChangeNotification] {
             workspaceObservers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                self?.refresh(afterDelay: Self.confirmDelay)
+                self?.requestEvaluation()
             })
         }
 
         // Dock preference changes (position, auto-hide, size, magnification).
         observers.append(DistributedNotificationCenter.default().addObserver(
             forName: NSNotification.Name("com.apple.dock.prefchanged"), object: nil, queue: .main
-        ) { [weak self] _ in self?.refresh(afterDelay: Self.confirmDelay) })
+        ) { [weak self] _ in self?.requestEvaluation() })
 
-        // The push sensor: Dock-driven notifications, the fastest path that
-        // exists — so fast its event must be used raw, with no throttle or
-        // delay, or the whole point of push is lost. Inert without
-        // Accessibility; started here and re-attached whenever the grant
-        // appears or the Dock relaunches.
-        sensor.onEvent = { [weak self] in self?.evaluate() }
+        // The push sensor: Dock-driven notifications, the fastest signal that
+        // exists. Its callback only marks us dirty — the coalescer decides
+        // when the actual measurement happens.
+        sensor.onEvent = { [weak self] in self?.requestEvaluation() }
         sensor.start()
 
         let timer = Timer(timeInterval: Self.pollInterval, repeats: true) { [weak self] _ in self?.pollTicked() }
         RunLoop.main.add(timer, forMode: .common)
         pollTimer = timer
 
-        // Pointer-driven tracking is what makes magnification follow in real
-        // time when the sensor is not running (no Accessibility): the Dock
-        // only magnifies while the pointer is on it, and mouse-moved events
-        // are exactly the signal that this is happening.
+        // Pointer-driven tracking covers the no-Accessibility case: the Dock
+        // only magnifies while the pointer is on it, so mouse-moved events near
+        // the strip are the signal. They mark dirty like everything else.
         func track(_ monitor: Any?) {
             if let monitor { pointerMonitors.append(monitor) }
         }
@@ -132,7 +100,7 @@ final class DockWatcher {
         pollTimer = nil
         pointerMonitors.forEach { NSEvent.removeMonitor($0) }
         pointerMonitors.removeAll()
-        pendingReading = nil
+        evaluationScheduled = false
     }
 
     /// Forces a re-read, e.g. right after the Accessibility grant is given and
@@ -142,66 +110,139 @@ final class DockWatcher {
         evaluate()
     }
 
-    private func refresh(afterDelay delay: TimeInterval) {
-        guard delay > 0 else { evaluate(); return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.evaluate() }
+    // MARK: - The coalescer
+
+    /// Minimum spacing between two evaluations: one frame. Every dirty-mark
+    /// lands within the same window, so a notification storm costs exactly one
+    /// synchronous AX read per window instead of one per event.
+    static let coalesceInterval: TimeInterval = 0.033
+    /// Backstop poll for changes nothing else observes — and the sensor's
+    /// health check.
+    private static let pollInterval: TimeInterval = 1.5
+
+    private var evaluationScheduled = false
+    private var lastEvaluationStart = Date.distantPast
+    /// Re-entrancy guard: if an event fires while an evaluation is mid-flight
+    /// (possible when a recipient calls back into the watcher), it schedules
+    /// the next tick instead of recursing.
+    private var evaluating = false
+
+    /// Marks the Dock dirty. At most one evaluation is ever scheduled; the
+    /// first mark inside a fresh coalesce window books it.
+    private func requestEvaluation() {
+        guard !evaluationScheduled else { return }
+        evaluationScheduled = true
+        let elapsed = Date().timeIntervalSince(lastEvaluationStart)
+        let delay = max(0, Self.coalesceInterval - elapsed)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.evaluationScheduled else { return }
+            self.evaluationScheduled = false
+            self.evaluate()
+        }
     }
 
-    /// Poll backstop: re-measure, and keep the sensor attached. A Dock relaunch
-    /// or a destroyed element invalidates the observer; the health check here
-    /// re-attaches within one poll instead of never.
     private func pollTicked() {
         if !sensor.isHealthy { sensor.refresh() }
-        evaluate()
+        requestEvaluation()
     }
 
-    private func evaluate() {
-        lastEvaluation = Date()
-        let latest = DockGeometry.current()
-        guard latest != current else {
-            // Reverted to the accepted geometry — nothing to confirm anymore.
-            pendingReading = nil
-            return
-        }
-
-        if Self.isStructural(latest, comparedTo: current) {
-            pendingReading = nil
-            current = latest
-            onChange?(Reading(dock: latest, isTransient: false))
-            return
-        }
-
-        // Size-only change. The one change that is *only* size is
-        // magnification — and magnification happens exclusively while the
-        // pointer is on the Dock. A size-only reading taken while the pointer
-        // is anywhere else is therefore a real resize, not an animation
-        // artefact, and becomes the resting geometry immediately.
-        let pointerOnDock = latest.dockStrip.contains(NSEvent.mouseLocation)
-        let isConfirmation = pendingReading == latest
-        pendingReading = latest
-        onChange?(Reading(dock: latest, isTransient: pointerOnDock))
-        if isConfirmation || !pointerOnDock {
-            pendingReading = nil
-            current = latest
-            onChange?(Reading(dock: latest, isTransient: false))
-        } else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + Self.confirmDelay) { [weak self] in self?.evaluate() }
-        }
-    }
-
-    /// Re-measures while the pointer moves near or on the Dock — the
-    /// magnification path when the sensor is not running. Unthrottled while
-    /// the pointer is *near the Dock's strip* (that is the only place the Dock
-    /// can be changing), ignored elsewhere, so the Dock's own magnification
-    /// animation is tracked at event rate instead of being sampled.
     private func pointerMoved() {
-        guard Date().timeIntervalSince(lastEvaluation) >= Self.pointerThrottle else { return }
         // A generous approach zone around the strip: magnification only starts
-        // once the pointer is essentially on the Dock, but starting the
-        // re-measure slightly early hides the first frame of the reveal.
+        // once the pointer is essentially on the Dock, but measuring slightly
+        // early hides the first frame of the reveal.
         let strip = current.dockStrip.insetBy(dx: -60, dy: -120)
         guard strip.contains(NSEvent.mouseLocation) else { return }
-        evaluate()
+        requestEvaluation()
+    }
+
+    /// One coalesced evaluation: one AX read, one pure decision, at most one
+    /// report.
+    private func evaluate() {
+        guard !evaluating else { requestEvaluation(); return }
+        evaluating = true
+        lastEvaluationStart = Date()
+
+        let latest = DockGeometry.current()
+        let decision = Self.fold(&state,
+                                 reading: latest,
+                                 pointerOnDock: latest.dockStrip.contains(NSEvent.mouseLocation))
+        evaluating = false
+
+        switch decision {
+        case .idle:
+            break
+        case .offerTransient(let dock):
+            onChange?(Reading(dock: dock, isTransient: true))
+        case .adopt(let dock):
+            onChange?(Reading(dock: dock, isTransient: false))
+        }
+    }
+
+    // MARK: - The decision core (pure — the headless suite covers it directly)
+
+    /// What one reading decides, given the promotion state.
+    enum Decision: Equatable {
+        /// The reading matches the accepted geometry; nothing to report.
+        case idle
+        /// Report as transient: the Dock is breathing (magnification) under
+        /// the pointer. The reading is held as the promotion candidate.
+        case offerTransient(DockGeometry)
+        /// The reading becomes the resting geometry and is reported as such.
+        case adopt(DockGeometry)
+    }
+
+    /// The promotion model: which reading is accepted as resting geometry, and
+    /// which size-only reading is currently awaiting confirmation.
+    struct PromotionState: Equatable {
+        var accepted: DockGeometry
+        var candidate: DockGeometry?
+        var repeatedReadings: Int = 0
+    }
+
+    /// How many consecutive identical size-only readings promote a candidate
+    /// to resting geometry. Two: the Dock's magnification animation never
+    /// holds a frame still long enough to repeat inside two coalesce windows,
+    /// but a settled Dock (divider drag done, reveal finished) reads the same
+    /// on every tick until promoted.
+    static let promotionQuorum = 2
+
+    /// Folds one coalesced reading into the state and decides what to emit.
+    ///
+    /// The promotion rules, in order:
+    /// - Same as accepted → idle. This is also the "animation unwound" case:
+    ///   it clears any stale candidate so a later blip starts fresh.
+    /// - Structurally different (edge, screen, auto-hide, tile size) → adopt
+    ///   immediately. These cannot be animation artefacts.
+    /// - Size-only: a new shape resets the count; a repeated shape counts up.
+    ///   Adopt when the count reaches quorum *or* the pointer is off the Dock
+    ///   — magnification happens only under the pointer, so a size-only
+    ///   reading without it can only be a real resize (a divider drag without
+    ///   tile-size change, a settings-slider resize, the tail of a reveal).
+    static func fold(_ state: inout PromotionState, reading: DockGeometry, pointerOnDock: Bool) -> Decision {
+        if reading == state.accepted {
+            state.candidate = nil
+            state.repeatedReadings = 0
+            return .idle
+        }
+        if isStructural(reading, comparedTo: state.accepted) {
+            state.candidate = nil
+            state.repeatedReadings = 0
+            state.accepted = reading
+            return .adopt(reading)
+        }
+        if reading == state.candidate {
+            state.repeatedReadings += 1
+        } else {
+            state.candidate = reading
+            state.repeatedReadings = 1
+        }
+        if !pointerOnDock || state.repeatedReadings >= promotionQuorum {
+            state.accepted = reading
+            state.candidate = nil
+            state.repeatedReadings = 0
+            return .adopt(reading)
+        }
+        return .offerTransient(reading)
     }
 
     /// Changes that cannot be an animation artefact: a different edge, screen,
@@ -214,4 +255,8 @@ final class DockWatcher {
             || latest.autohides != current.autohides
             || latest.tileSize != current.tileSize
     }
+
+    /// The promotion state — private storage for `fold`, exposed as a stored
+    /// property so the struct stays a value type the tests can also drive.
+    private var state: PromotionState
 }
