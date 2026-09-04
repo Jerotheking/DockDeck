@@ -205,12 +205,20 @@ enum ShelfGeometry {
     /// Grows the shelf into the screen, and along the strip when the gap alone
     /// is too short. The end anchored to the screen edge never moves, so the
     /// shelf appears to unfold out of the Dock rather than jump.
+    ///
+    /// The expanded frame is welded to the Dock's **inner face** — above a
+    /// bottom Dock, inboard of a side Dock — exactly where the sidecar and
+    /// transient placements already put it. Growing from inside the strip
+    /// (the old behavior) produced an expanded frame that covered the Dock's
+    /// own icons — fatal on a side Dock, where the depth axis runs straight
+    /// across the icon column, and worst for a shelf at a window level above
+    /// the Dock's, which then also swallowed the icons' clicks.
     private static func expand(from collapsed: CGRect, slot: Slot, dock: DockGeometry, strip: CGRect, screen: CGRect, depth: CGFloat) -> CGRect {
         var frame = collapsed
         switch dock.orientation {
         case .bottom:
-            frame.size.height = min(depth, screen.height)
-            frame.origin.y = strip.minY
+            frame.size.height = min(depth, screen.height - strip.height)
+            frame.origin.y = strip.maxY
             if frame.width < minimumUsefulLength {
                 let extra = min(minimumUsefulLength - frame.width, screen.width - frame.width)
                 // Grow toward the middle of the screen, away from the outer edge.
@@ -220,8 +228,8 @@ enum ShelfGeometry {
                 }
             }
         case .right:
-            frame.size.width = min(depth, screen.width)
-            frame.origin.x = strip.maxX - frame.width
+            frame.size.width = min(depth, screen.width - strip.width)
+            frame.origin.x = strip.minX - frame.width
             if frame.height < minimumUsefulLength {
                 let extra = min(minimumUsefulLength - frame.height, screen.height - frame.height)
                 if slot == .leading { frame.size.height += extra } else {
@@ -230,8 +238,8 @@ enum ShelfGeometry {
                 }
             }
         case .left:
-            frame.size.width = min(depth, screen.width)
-            frame.origin.x = strip.minX
+            frame.size.width = min(depth, screen.width - strip.width)
+            frame.origin.x = strip.maxX
             if frame.height < minimumUsefulLength {
                 let extra = min(minimumUsefulLength - frame.height, screen.height - frame.height)
                 if slot == .leading { frame.size.height += extra } else {

@@ -29,6 +29,7 @@ enum ModelSelfTest {
         dockReadingStability()
         decisionCore()
         transientGeometry()
+        expandedNeverCoversDock()
         renameValidation()
         try archivePreconditions()
         try safeRemoval()
@@ -38,6 +39,55 @@ enum ModelSelfTest {
             throw Failure(message: "\(failures.count) of \(checks) checks failed")
         }
         print("DockDeck model self-test: PASS (\(checks) checks — store, persistence, settings, migration, dock geometry, promotion core, springs, rename, archive, safe removal)")
+    }
+
+    /// The contract that came out of the real overlap report: an expanded
+    /// shelf lives *outside* the Dock's band — welded to its inner face — in
+    /// every orientation and every slot. The old in-gap expansion grew from
+    /// inside the strip and covered the Dock's icons outright. Touching the
+    /// band on a shared edge is required (no floating gap); covering it is
+    /// forbidden — and since a shared edge yields a zero-*width* intersection
+    /// with real height, "no coverage" is measured on the depth axis.
+    private static func expandedNeverCoversDock() {
+        let screen = CGRect(x: 0, y: 0, width: 3456, height: 2234)
+        for orientation in DockGeometry.Orientation.allCases {
+            let frame: CGRect
+            switch orientation {
+            case .bottom: frame = CGRect(x: 600, y: 0, width: 2200, height: 160)
+            case .left: frame = CGRect(x: 0, y: 120, width: 160, height: 1900)
+            case .right: frame = CGRect(x: screen.maxX - 160, y: 120, width: 160, height: 1900)
+            }
+            let dock = DockGeometry(frame: frame, orientation: orientation, autohides: false,
+                                    screen: screen, source: .accessibility)
+            let strip = dock.dockStrip
+            for slot in ShelfGeometry.Slot.allCases {
+                let layout = ShelfGeometry.layout(slot: slot, dock: dock)
+                expect(layout.isViable, "\(orientation) \(slot): a Dock with gaps places a viable shelf")
+                let overlap = strip.intersection(layout.expanded)
+                let coversBand = orientation == .bottom ? overlap.height > 0 : overlap.width > 0
+                expect(!coversBand,
+                       "\(orientation) \(slot): the expanded shelf never covers the Dock's band")
+                // The collapsed shelf shares the band (it claims the gap where
+                // no icons live) but never the Dock's own frame. Touching on a
+                // shared edge yields a degenerate (zero-area) intersection, so
+                // the test demands a strictly positive overlap to fail.
+                let sitsOnDock = dock.frame.intersection(layout.collapsed)
+                expect(sitsOnDock.width <= 0 || sitsOnDock.height <= 0,
+                       "\(orientation) \(slot): the collapsed shelf never sits on the Dock itself")
+                // Welded to the inner face: no stray gap between shelf and Dock.
+                switch orientation {
+                case .bottom:
+                    expect(layout.expanded.minY == strip.maxY,
+                           "\(slot): expanded bottom edge is welded to the Dock's inner face")
+                case .left:
+                    expect(layout.expanded.minX == strip.maxX,
+                           "\(slot): expanded left edge is welded to the Dock's inner face")
+                case .right:
+                    expect(layout.expanded.maxX == strip.minX,
+                           "\(slot): expanded right edge is welded to the Dock's inner face")
+                }
+            }
+        }
     }
 
     // MARK: - Store
@@ -261,7 +311,10 @@ enum ModelSelfTest {
 
             // Expanding must not overlap the Dock's own length.
             expect(layout.expanded.width > layout.collapsed.width, "\(slot.rawValue) expands into the screen")
-            expect(layout.expanded.maxX == dock.frame.maxX, "\(slot.rawValue) stays anchored to the screen edge while expanding")
+            // The expanded sheet is welded to the Dock's inner face (inboard),
+            // never covering the icon column.
+            expect(layout.expanded.maxX == dock.dockStrip.minX,
+                   "\(slot.rawValue) expands welded to the Dock's inner face")
         }
 
         // A 140 pt gap is shorter than one useful row list, so expansion also
@@ -292,7 +345,7 @@ enum ModelSelfTest {
         expect(bottomLeading.isViable, "a bottom Dock yields a viable leading shelf")
         expect(bottomLeading.collapsed.height == 70, "a bottom shelf is as thick as the Dock")
         expect(abs(bottomLeading.collapsed.maxX - bottom.frame.minX) < 1, "a bottom shelf butts up against the Dock")
-        expect(bottomLeading.expanded.minY == bottom.screen.minY, "a bottom shelf grows upward from the bottom edge")
+        expect(bottomLeading.expanded.minY == bottom.dockStrip.maxY, "a bottom shelf grows upward from the Dock's inner face")
         expect(bottomLeading.expanded.height > bottomLeading.collapsed.height, "a bottom shelf expands into the screen")
 
         // A left Dock mirrors the right one.
@@ -303,7 +356,7 @@ enum ModelSelfTest {
         let leftLayout = ShelfGeometry.layout(slot: .trailing, dock: left)
         expect(leftLayout.isViable, "a left Dock yields a viable shelf")
         expect(leftLayout.collapsed.minX == 0, "a left shelf hugs the left screen edge")
-        expect(leftLayout.expanded.minX == 0, "a left shelf expands rightward from the edge")
+        expect(leftLayout.expanded.minX == left.dockStrip.maxX, "a left shelf expands rightward from the Dock's inner face")
 
         // A Dock reported partly off its screen — seen when a display is
         // disconnected between the measurement and its use. Refusing is correct;

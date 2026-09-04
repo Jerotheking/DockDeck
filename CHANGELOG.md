@@ -4,6 +4,31 @@
 
 First build of DockDeck that actually appears on screen.
 
+### Fixed — build 12: an expanded shelf no longer covers the Dock's icons
+
+The report that matters most: *"ya no puedo acceder a mis iconos"* — with a
+side Dock, expanding a shelf laid its 320 pt sheet straight over the Dock's
+icon column, and since the shelf lives at a window level above the Dock's,
+it swallowed the icons' clicks too.
+
+- **Root cause.** The in-gap expansion grew *from inside* the Dock's band:
+  the collapsed shelf sits in the band (in the gap, where no icons live),
+  and the expanded frame simply grew perpendicular from there. The sidecar
+  placement and the transient path already anchored to the Dock's inner
+  face — only the everyday in-gap case did not.
+- **The fix.** Expansion is welded to the Dock's inner face in every
+  orientation: above a bottom Dock, inboard of a side Dock — exactly where
+  the shelf pops out in front, never on top of the icons. Verified live
+  against the real Dock's measurements: expanded spans 3067–3387, the
+  Dock's column (3387–3440) stays completely free.
+- **A new invariant in the model suite** (`expandedNeverCoversDock`): for
+  every orientation and every slot, the expanded frame covers none of the
+  Dock's band, the collapsed frame never sits on the Dock's own frame, and
+  the expanded sheet touches the band's inner face with no stray gap. Suite
+  now 224 checks. Three older placement assertions were updated from the
+  old semantics (grow inside the band, anchored to the screen edge) to the
+  correct one.
+
 ### Changed — build 11: WS-2 + WS-1, the expansion morph and content inertia
 
 Implements the "wow" pair from `DESIGN_THINKING.md` — the shelf grows as one
