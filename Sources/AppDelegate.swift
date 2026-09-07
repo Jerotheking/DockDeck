@@ -16,6 +16,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var expandObserver: NSObjectProtocol?
     private var pointerMonitors: [Any] = []
     private var dragActivation: DragActivationMonitor?
+    private var notchPanel: NotchPanel?
+    private var notchController: NotchController?
     private var didCleanUp = false
     /// Auto-hide stays disarmed until this instant. Hiding the shelves before
     /// the user has seen them reproduces, from their side, exactly the bug this
@@ -91,6 +93,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Diagnostics.trace("panel+controller:constructed")
         Diagnostics.trace("view:attached")
 
+        installNotchShelf()
+        Diagnostics.trace("notch:installed")
+
         watcher.start()
         installHotkeys()
         // Under diagnostics the shelves must show their launch state, not react
@@ -150,6 +155,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pointerMonitors.forEach { NSEvent.removeMonitor($0) }
         pointerMonitors.removeAll()
         dragActivation?.stop(); dragActivation = nil
+        notchController?.stop(); notchController = nil
+        notchPanel?.orderOut(nil); notchPanel = nil
         if let toggleObserver { NotificationCenter.default.removeObserver(toggleObserver); self.toggleObserver = nil }
         if let expandObserver { NotificationCenter.default.removeObserver(expandObserver); self.expandObserver = nil }
         preferences?.close(); preferences = nil
@@ -180,6 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let panel = ShelfPanel(slot: slot, dock: dock, appearance: settings.settings.appearance)
             let controller = ShelfViewController(role: role, store: store, settingsStore: settings, projectStore: projectStore)
             controller.panel = panel
+            panel.contentController = controller
 
             let content = controller.view
             content.translatesAutoresizingMaskIntoConstraints = false
@@ -203,6 +211,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func isEnabled(role: ShelfRole, in settings: ShelfSettings) -> Bool {
         role == .library ? settings.showLibraryShelf : settings.showRecentsShelf
     }
+
+    /// Phase 1 of the notch mode (NOTCH_DESIGN_BRIEF.md): the anchored
+    /// silhouette with hover/click/Esc activation and the one-spring morph.
+    /// Installed only when a display has a real notch; the Dock shelves
+    /// remain the answer on every other screen. Skipped under diagnostics so
+    /// headless verification runs stay deterministic.
+    private func installNotchShelf() {
+        guard !Diagnostics.isEnabled,
+              let measurement = NotchGeometry.Measurement.measureNotchedScreen() else { return }
+        let panel = NotchPanel(measurement: measurement)
+        let controller = NotchController(panel: panel)
+        notchPanel = panel
+        notchController = controller
+        controller.start()
+    }
+
+    @objc private func toggleNotchAction() { notchPanel?.toggle() }
 
     private func presentShelves() {
         guard let dock = dockWatcher?.current, let settings else { return }
@@ -382,6 +407,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(toggle)
         let expand = NSMenuItem(title: "Expand Shelves", action: #selector(expandAction), keyEquivalent: "")
         menu.addItem(expand)
+        let notch = NSMenuItem(title: "Toggle Notch Shelf", action: #selector(toggleNotchAction), keyEquivalent: "")
+        if notchPanel == nil { notch.isHidden = true }
+        menu.addItem(notch)
         menu.addItem(NSMenuItem(title: "New Note", action: #selector(newNoteAction), keyEquivalent: ""))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Preferences…", action: #selector(preferencesAction), keyEquivalent: ","))

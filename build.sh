@@ -49,6 +49,9 @@ SOURCES=(
   DockWatcher.swift
   DockSensor.swift
   GlassInteractor.swift
+  NotchGeometry.swift
+  NotchPanel.swift
+  NotchController.swift
   FinderActions.swift
   GlobalHotkey.swift
   MarkdownExport.swift

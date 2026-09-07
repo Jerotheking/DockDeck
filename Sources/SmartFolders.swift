@@ -36,12 +36,19 @@ struct SmartSectionResolver {
         // Values are prefetched by the enumerator (one pass, no per-file
         // syscalls); the hard cap bounds even a recursive walk.
         let scanCap = recursive ? 20_000 : 8_000
-        let newest = enumerator.compactMap { entry -> (url: URL, modified: Date)? in
-            guard let url = entry as? URL,
-                  let values = try? url.resourceValues(forKeys: keys),
-                  values.isRegularFile == true || values.isDirectory == true else { return nil }
-            return (url, values.contentModificationDate ?? .distantPast)
-        }.prefix(scanCap)
+        // Bounded consumption: pull at most `scanCap` entries *out of the
+        // enumerator* and stop. The previous version streamed the whole
+        // sequence through compactMap first — on a big folder that
+        // materialized every entry into an array before the cap applied,
+        // churning hundreds of MB per scan pass.
+        var collected: [(url: URL, modified: Date)] = []
+        collected.reserveCapacity(512)
+        while collected.count < scanCap, let entry = enumerator.nextObject() as? URL {
+            guard let values = try? entry.resourceValues(forKeys: keys),
+                  values.isRegularFile == true || values.isDirectory == true else { continue }
+            collected.append((entry, values.contentModificationDate ?? .distantPast))
+        }
+        let newest = collected
             .sorted { $0.modified > $1.modified }
             .prefix(limit)
         return newest.map { entry in

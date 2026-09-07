@@ -30,6 +30,7 @@ enum ModelSelfTest {
         decisionCore()
         transientGeometry()
         expandedNeverCoversDock()
+        notchGeometry()
         renameValidation()
         try archivePreconditions()
         try safeRemoval()
@@ -88,6 +89,99 @@ enum ModelSelfTest {
                 }
             }
         }
+    }
+
+    /// Phase 1 of the notch mode: the pure geometry contract from
+    /// NOTCH_DESIGN_BRIEF.md §9 — exact silhouette coverage, open-panel
+    /// containment, morph fraction monotonicity, and the silhouette path's
+    /// structure. No window server needed.
+    private static func notchGeometry() {
+        let screen = CGRect(x: 886, y: -1169, width: 1800, height: 1169)
+        let m = NotchGeometry.Measurement.fixture(screen: screen, notchWidth: 220, notchHeight: 38)
+        expect(m.hasNotch, "a fixture measurement reports a notch")
+
+        // Closed: physical notch + clickMargin on left/right/below, max edge
+        // flush with the screen top, and never above the screen.
+        let closed = NotchGeometry.closedRect(m)
+        expect(closed.width == m.notch.width + 2 * NotchGeometry.clickMargin,
+               "closed silhouette is the notch plus the click margin on each side")
+        expect(closed.height == m.notch.height + NotchGeometry.clickMargin,
+               "closed silhouette extends below the notch by the click margin")
+        expect(closed.maxY == m.screen.maxY, "closed silhouette reaches the screen's top edge")
+        expect(closed.minX == m.notch.minX - NotchGeometry.clickMargin,
+               "closed silhouette starts one click-margin left of the notch")
+        expect(abs(closed.midX - m.screen.midX) < 0.001, "closed silhouette stays centered on the notch")
+
+        // No-notch measurement: everything degrades to zero/viable.
+        let flat = NotchGeometry.Measurement.fixture(screen: screen, notchWidth: 0, notchHeight: 0)
+        expect(!flat.hasNotch, "a no-notch fixture reports no notch")
+        expect(NotchGeometry.closedRect(flat) == .zero, "no notch means no closed silhouette")
+
+        // Open: centered, hanging down, inside the screen.
+        let open = NotchGeometry.openRect(m)
+        expect(abs(open.midX - m.screen.midX) < 0.001, "open panel stays centered on the notch")
+        expect(open.maxY == m.screen.maxY, "open panel hangs from the screen's top edge")
+        expect(m.screen.contains(open), "open panel is fully inside the screen")
+        expect(open.height <= NotchGeometry.maximumOpenDepth, "open depth is clamped to the maximum")
+        let deep = NotchGeometry.openRect(m, depth: 9999)
+        expect(deep.height == NotchGeometry.maximumOpenDepth, "an absurd depth clamps to the maximum")
+        let shallow = NotchGeometry.openRect(m, depth: 1)
+        expect(shallow.height == NotchGeometry.minimumOpenDepth, "a tiny depth clamps to the minimum")
+        // A narrow screen shrinks the width instead of overflowing.
+        let tiny = NotchGeometry.Measurement.fixture(screen: CGRect(x: 0, y: 0, width: 500, height: 800),
+                                                     notchWidth: 100, notchHeight: 32)
+        let tinyOpen = NotchGeometry.openRect(tiny)
+        expect(tinyOpen.width <= tiny.screen.width - 2 * NotchGeometry.clickMargin - 16,
+               "a narrow screen shrinks the open width instead of overflowing")
+        // Closed and open never sit on each other's opposite side.
+        expect(open.height > closed.height, "the open panel is taller than the closed silhouette")
+
+        // Window/chrome split: the chrome loses exactly the shadow strip.
+        let window = NotchGeometry.windowFrame(for: open)
+        expect(window.height == open.height + NotchGeometry.shadowPadding,
+               "the window frame extends below the content by the shadow padding")
+        let chrome = NotchGeometry.chromeRect(inWindow: window)
+        expect(chrome.height == open.height, "the chrome frame equals the content rect's height")
+
+        // Morph fraction: monotonic in content height, clamped at both ends.
+        expect(NotchGeometry.morphFraction(contentHeight: closed.height, closed: closed, open: open) == 0,
+               "the closed height maps to morph fraction zero")
+        expect(NotchGeometry.morphFraction(contentHeight: open.height, closed: closed, open: open) == 1,
+               "the open height maps to morph fraction one")
+        let mid = NotchGeometry.morphFraction(contentHeight: (closed.height + open.height) / 2, closed: closed, open: open)
+        expect(mid > 0.45 && mid < 0.55, "the midpoint maps to about half the morph")
+        expect(NotchGeometry.morphFraction(contentHeight: -100, closed: closed, open: open) == 0,
+               "heights below closed clamp to zero")
+        expect(NotchGeometry.morphFraction(contentHeight: 99999, closed: closed, open: open) == 1,
+               "heights above open clamp to one")
+
+        // Radii interpolate with the fraction and stay monotonic.
+        let r0 = NotchGeometry.radii(fraction: 0)
+        let r1 = NotchGeometry.radii(fraction: 1)
+        expect(r0.top == NotchGeometry.closedTopRadius && r0.bottom == NotchGeometry.closedBottomRadius,
+               "fraction zero yields the closed radii")
+        expect(r1.top == NotchGeometry.openTopRadius && r1.bottom == NotchGeometry.openBottomRadius,
+               "fraction one yields the open radii")
+        expect(NotchGeometry.radii(fraction: 0.5).top > r0.top && NotchGeometry.radii(fraction: 0.5).top < r1.top,
+               "radii interpolate monotonically between the states")
+
+        // The silhouette path is well-formed at both extremes and mid-morph:
+        // closed bounds, symmetric, and a valid non-empty path.
+        for (f, size) in [(CGFloat(0), closed.size), (CGFloat(1), open.size), (CGFloat(0.5), open.size)] {
+            let r = NotchGeometry.radii(fraction: f)
+            let path = NotchGeometry.silhouettePath(size: size, topRadius: r.top, bottomRadius: r.bottom)
+            let box = path.boundingBox
+            expect(abs(box.width - size.width) < 1.5 && box.height > 0,
+                   "the silhouette path spans its rect at fraction \(f)")
+            expect(!path.isEmpty, "the silhouette path is never empty")
+        }
+
+        // The notchOpen/notchClose presets exist and keep the brief's character:
+        // open is eager with mild overshoot, close is quicker and calmer.
+        expect(SpringParameters.notchClose.response < SpringParameters.notchOpen.response,
+               "notch close is the quicker spring")
+        expect(SpringParameters.notchOpen.dampingFraction > 0.8,
+               "notch open stays on the decided side of bouncy")
     }
 
     // MARK: - Store

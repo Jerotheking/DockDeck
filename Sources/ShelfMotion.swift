@@ -43,6 +43,12 @@ struct SpringParameters {
     /// A structural relocation — the Dock moved to another edge and the shelf
     /// travels with it. Decisive and quick, not the liquid reveal.
     static let slide = SpringParameters(response: 0.45, dampingFraction: 0.90)
+    /// Notch open: decided, slightly eager — the silhouette grows into a
+    /// panel with a hint of overshoot (brief §5). Between the genre's sobriety
+    /// (boring) and jelly (NotchDrop's 0.5 s / 0.25 bounce).
+    static let notchOpen = SpringParameters(response: 0.32, dampingFraction: 0.85)
+    /// Notch close: quicker, almost no bounce — getting out of the way.
+    static let notchClose = SpringParameters(response: 0.24, dampingFraction: 0.92)
 
     var stiffness: CGFloat { pow(2 * .pi / max(response, 0.01), 2) }
     var damping: CGFloat { (4 * .pi * dampingFraction) / max(response, 0.01) }

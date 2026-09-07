@@ -4,6 +4,37 @@
 
 First build of DockDeck that actually appears on screen.
 
+### Added — build 14: Phase 1 of the notch mode + a second recents-scan runaway killed
+
+The pivot the product needed: the notch anchor exists and runs. `NotchGeometry`
+(pure, headless-tested) measures the real notch from `NSScreen` (`safeAreaInsets`,
+`auxiliaryTopLeft/RightArea` — no hacks) and derives every rect: the closed
+silhouette (physical notch + 4 pt click margin, never one pixel more of the menu
+bar), the open 640 pt panel clamped inside the screen, the peek shape (Phase 2),
+cone-curve silhouette radii (r5.5/r14 closed → r18/r22 open, the notch's physical
+flare), and the morph fraction that drives them from one spring. `NotchPanel`
+applies it per frame — window frame, silhouette path, and shadow opacity are
+coupled properties of a single `SpringAnimator`, no second clock, no crossfades.
+`NotchController` owns activation: 0.3 s hover-to-open, click, Esc, click-outside
+close, courtesy close delay, and screen-change re-anchoring (lid closed → order
+out). Wired at launch (skipped under `DOCKDECK_SUPPORT_DIR` diagnostics) plus a
+status-menu toggle. Live-verified via CGWindowList: the silhouette sits at
+layer 27, 228×62, top-center of the notched display — exactly the closed spec.
+Model suite grew the `notchGeometry` block (radii caps, rect invariants, morph
+ordering, path structure): **258 checks**.
+
+The catch found during verification: CPU waves at ~30% with RSS churning — and
+the sample named `SmartSectionResolver`, not the notch code. The build-11 fix
+had left two hazards: the scan still *materialized every entry* of ~/Downloads
+(≈2k URL+Date tuples, then sorted them) before any cap applied, and passes
+**stacked** — the 20 s timer plus every Downloads change launched overlapping
+scans on the concurrent utility queue. Fixed at both roots: the enumerator is
+now consumed *bounded* (pulled at most `scanCap` entries, then stops), and
+`refreshRecents` debounces (0.75 s), never runs two scans at once, and runs one
+trailing pass if a request lands mid-scan — a burst of Downloads events now
+costs exactly one scan. Verified live: sustained 0.0% idle CPU, stable ~106 MB
+RSS, single-scan blips only.
+
 ### Fixed — build 12: an expanded shelf no longer covers the Dock's icons
 
 The report that matters most: *"ya no puedo acceder a mis iconos"* — with a

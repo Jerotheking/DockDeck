@@ -63,6 +63,12 @@ final class ShelfViewController: NSViewController, NSSearchFieldDelegate {
     private var lastPasteboardChange: Int
     private var clipboardTimer: Timer?
     private var recentsTimer: Timer?
+    /// Coalescing state for recents scans (learned from a live runaway): a
+    /// debounced request, an in-flight flag, and a trailing marker so scans
+    /// never stack — a burst of Downloads events costs exactly one scan.
+    private var recentsScanWork: DispatchWorkItem?
+    private var recentsScanInFlight = false
+    private var recentsScanDirty = false
     private var searchWorkItem: DispatchWorkItem?
     private var pendingSaveWorkItem: DispatchWorkItem?
     private var monitor: WorkspaceMonitor?
@@ -416,6 +422,9 @@ final class ShelfViewController: NSViewController, NSSearchFieldDelegate {
     func stopServices() {
         clipboardTimer?.invalidate(); clipboardTimer = nil
         recentsTimer?.invalidate(); recentsTimer = nil
+        recentsScanWork?.cancel(); recentsScanWork = nil
+        recentsScanInFlight = false
+        recentsScanDirty = false
         searchWorkItem?.cancel(); searchWorkItem = nil
         pendingSaveWorkItem?.cancel(); pendingSaveWorkItem = nil
         monitor?.stop(); monitor = nil
@@ -425,11 +434,26 @@ final class ShelfViewController: NSViewController, NSSearchFieldDelegate {
     }
 
     private func refreshRecents() {
+        // The timer fires every 20 s and every Downloads change fires again;
+        // each scan touches thousands of entries. Overlapping passes stack
+        // into a multi-core burn with RSS churn. So: debounce (a burst costs
+        // one scan 0.75 s after the last request), never run two scans at
+        // once, and run one trailing pass when a request lands mid-scan.
+        recentsScanWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.runRecentsScan() }
+        recentsScanWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75, execute: work)
+    }
+
+    private func runRecentsScan() {
+        recentsScanWork = nil
+        guard !recentsScanInFlight else { recentsScanDirty = true; return }
         let limit = settingsStore.settings.smartLimit
         let showScreenshots = settingsStore.settings.monitorScreenshots
         let showDownloads = settingsStore.settings.monitorDownloads
         // Filesystem enumeration off the main thread: the Downloads folder can
         // hold thousands of entries, and this runs on a timer.
+        recentsScanInFlight = true
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             var items: [ShelfItem] = []
@@ -437,6 +461,11 @@ final class ShelfViewController: NSViewController, NSSearchFieldDelegate {
             if showDownloads { items += SmartSectionResolver.items(for: .downloads, store: self.store, limit: limit) }
             let ordered = Array(items.sorted { $0.lastUsedAt > $1.lastUsedAt }.prefix(limit))
             DispatchQueue.main.async {
+                self.recentsScanInFlight = false
+                if self.recentsScanDirty {
+                    self.recentsScanDirty = false
+                    self.refreshRecents()
+                }
                 guard self.recentsCache.map(\.id) != ordered.map(\.id) else { return }
                 self.recentsCache = ordered
                 self.reload(force: true)

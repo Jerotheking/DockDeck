@@ -15,6 +15,7 @@ swiftc -O -parse-as-library -D DOCKDECK_SELFTEST \
   "$ROOT/Sources/DockSensor.swift" \
   "$ROOT/Sources/ShelfGeometry.swift" \
   "$ROOT/Sources/ShelfMotion.swift" \
+  "$ROOT/Sources/NotchGeometry.swift" \
   "$ROOT/Sources/ShelfSettings.swift" \
   "$ROOT/Sources/ProjectContext.swift" \
   "$ROOT/Sources/MarkdownExport.swift" \
