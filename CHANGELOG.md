@@ -4,6 +4,17 @@
 
 First build of DockDeck that actually appears on screen.
 
+### Fixed — build 18: the notch silhouette rendered as a perfectly transparent window
+
+The closed silhouette existed at the exact position (CGWindowList confirmed
+it) but painted *nothing*: `NotchChromeView.apply` built the silhouette path
+and fed it to the window's shadow — and never assigned `path` or `fillColor`
+to the fill layer itself. The shelf was an invisible window at a perfect
+position. The fill layer now receives the path, the fill, and its frame sized
+to the content area (window minus the shadow strip), and `layout()` re-applies
+the last known state so an init-time paint — which silently no-ops before the
+view joins a window — is redone the moment the window is on screen.
+
 ### Fixed — build 17: a wedged Downloads folder could freeze the launch forever
 
 The report was "se quitó del Dock" — the app had stopped tracking the Dock

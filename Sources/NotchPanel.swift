@@ -212,6 +212,9 @@ final class NotchChromeView: NSView {
     private var appliedFraction: CGFloat = -1
     private var appliedTop: CGFloat = -1
     private var appliedBottom: CGFloat = -1
+    private var lastFraction: CGFloat?
+    private var lastTop: CGFloat = 0
+    private var lastBottom: CGFloat = 0
 
     /// Applies the current morph state: cuts the silhouette path and ramps
     /// the shadow. Cheap guards keep repeated per-frame calls free when the
@@ -225,19 +228,31 @@ final class NotchChromeView: NSView {
         appliedFraction = fraction
         appliedTop = topRadius
         appliedBottom = bottomRadius
+        lastFraction = fraction
+        lastTop = topRadius
+        lastBottom = bottomRadius
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        let path = NotchGeometry.silhouettePath(size: bounds.size,
+        // The silhouette covers the window minus the transparent shadow strip
+        // at its bottom; in this flipped view y=0 is the window's TOP edge, so
+        // a path of height `contentHeight` anchored at the origin hangs from
+        // the top — exactly where the notch is.
+        let contentHeight = max(1, bounds.height - NotchGeometry.shadowPadding)
+        let path = NotchGeometry.silhouettePath(size: CGSize(width: bounds.width, height: contentHeight),
                                                 topRadius: topRadius,
                                                 bottomRadius: bottomRadius)
-        // The fill IS the silhouette: near-black like the physical notch,
-        // with a shadow that follows the path so the open sheet separates
-        // from the screen behind it.
         if fillLayer == nil {
             fillLayer = CAShapeLayer()
             layer.addSublayer(fillLayer!)
         }
+        // The fill IS the silhouette: near-black like the physical notch. The
+        // path must be assigned to the *fill layer* — the original version
+        // only ever fed it to the window's shadow, so the shelf rendered as a
+        // perfectly transparent window at the perfect position.
+        fillLayer?.frame = bounds
+        fillLayer?.path = path
+        fillLayer?.fillColor = NSColor.black.cgColor
         layer.shadowOpacity = Float(0.35 * fraction)
         layer.shadowRadius = 14 * fraction + 1
         layer.shadowOffset = CGSize(width: 0, height: -6)
@@ -252,6 +267,10 @@ final class NotchChromeView: NSView {
         super.layout()
         fillLayer?.frame = bounds
         appliedFraction = -1 // force a re-cut on bounds change
+        // The layer only exists once the view joins a window, so an init-time
+        // apply is silently skipped; re-applying the last known state here
+        // guarantees the silhouette is painted as soon as the window is.
+        if let f = lastFraction { apply(fraction: f, topRadius: lastTop, bottomRadius: lastBottom) }
     }
 }
 
