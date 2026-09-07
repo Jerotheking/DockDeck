@@ -4,6 +4,15 @@
 
 First build of DockDeck that actually appears on screen.
 
+### Fixed — build 15: Preferences could not reach its own Dock placement section
+
+The settings window was fixed at 460×470 with no scroll view — content pinned
+top-only, so everything past ~470 pt (Sources, and the entire Dock placement
+section with the Accessibility grant) was cut off below the window edge with
+no way to reach it. The stack is now the document view of a scroll view pinned
+to all four edges, and the window is resizable (min 460×320): tall content
+scrolls, short content sits at the top.
+
 ### Added — build 14: Phase 1 of the notch mode + a second recents-scan runaway killed
 
 The pivot the product needed: the notch anchor exists and runs. `NotchGeometry`

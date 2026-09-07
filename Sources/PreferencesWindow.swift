@@ -57,9 +57,10 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
 
     private func build() {
         let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 470),
-                             styleMask: [.titled, .closable],
+                             styleMask: [.titled, .closable, .resizable],
                              backing: .buffered, defer: false)
         panel.title = "DockDeck Preferences"
+        panel.contentMinSize = NSSize(width: 460, height: 320)
         panel.isReleasedWhenClosed = false
         panel.delegate = self
         panel.level = .floating
@@ -145,11 +146,27 @@ final class PreferencesWindowController: NSObject, NSWindowDelegate {
         stack.alignment = .leading
         stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
-        background.addSubview(stack)
+        // The settings outgrew a fixed window long ago: without a scroll view
+        // everything below ~470 pt — including Dock placement — was cut off
+        // with no way to reach it. The stack is the document view of a scroll
+        // view pinned to all four edges; its width follows the window, its
+        // height stays intrinsic, so tall content scrolls and short content
+        // just sits at the top.
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = false
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        background.addSubview(scroll)
+        scroll.documentView = stack
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: background.topAnchor, constant: 18),
-            stack.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: 20),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: background.trailingAnchor, constant: -20)
+            scroll.topAnchor.constraint(equalTo: background.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: background.bottomAnchor),
+            scroll.leadingAnchor.constraint(equalTo: background.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: background.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: scroll.contentView.topAnchor, constant: 18),
+            stack.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor, constant: 20),
+            stack.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor, constant: -40)
         ])
         window = panel
     }
