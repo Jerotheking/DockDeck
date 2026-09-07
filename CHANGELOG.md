@@ -4,6 +4,39 @@
 
 First build of DockDeck that actually appears on screen.
 
+### Fixed — build 17: a wedged Downloads folder could freeze the launch forever
+
+The report was "se quitó del Dock" — the app had stopped tracking the Dock
+again. The live stack told the real story: the launch was blocked inside
+`open(Downloads, O_EVTONLY)` on the main thread, because the folder itself had
+wedged at the VFS level (`readdir` hung from any process; `fileproviderd` at
+63% CPU). Every launch since then froze before presenting anything — no
+shelves, no notch, no status menu. Two hardenings, plus the discovery that
+they also covered a second latent freeze:
+
+- **`WorkspaceMonitor` never blocks the main thread.** The folder open runs
+  on a background queue under a 2 s watchdog with an exactly-once hand-off
+  box: on timeout the monitor reports unavailable and the app launches
+  without Downloads watching; if the open completes late, the descriptor is
+  adopted (the folder unwedged after launch).
+- **Recents scans run on a dedicated serial queue.** A wedged `readdir`
+  inside the enumeration would previously hang a fresh concurrent thread
+  every timer tick; now it costs one hung thread, and when the wedge clears
+  the trailing-run flag fires one fresh scan automatically.
+- **The runtime suite now encodes the parked-state invariant.** With an
+  auto-hiding Dock, a first-run shelf correctly sits *past the screen edge*
+  (mirroring the parked Dock under the grace period), so "window server
+  reports it on screen" was asserting the wrong thing; the parked resting
+  layout is the assertion that matters. Suite: 19/19 — and it now passes
+  *with Downloads still wedged*, which is the regression test for the freeze.
+
+Separately, the recurring "grant revoked after every rebuild" bug was fixed
+at the root: TCC keys Accessibility to the app's designated requirement, and
+a plain ad-hoc signature's requirement is its own cdhash — new build, new
+hash, silent revocation. `build.sh` now signs ad-hoc with the requirement
+pinned to the bundle identifier (no keychain, no prompts), so the grant
+survives every rebuild.
+
 ### Fixed — build 15: Preferences could not reach its own Dock placement section
 
 The settings window was fixed at 460×470 with no scroll view — content pinned

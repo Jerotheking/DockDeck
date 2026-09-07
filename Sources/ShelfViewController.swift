@@ -66,9 +66,14 @@ final class ShelfViewController: NSViewController, NSSearchFieldDelegate {
     /// Coalescing state for recents scans (learned from a live runaway): a
     /// debounced request, an in-flight flag, and a trailing marker so scans
     /// never stack — a burst of Downloads events costs exactly one scan.
+    /// The scan runs on a dedicated *serial* queue: a VFS-wedged folder blocks
+    /// its readdir forever, and a serial queue plus the in-flight flag means
+    /// that costs one hung thread, not a new one every timer tick; when the
+    /// wedge clears, the trailing flag runs one fresh scan.
     private var recentsScanWork: DispatchWorkItem?
     private var recentsScanInFlight = false
     private var recentsScanDirty = false
+    private lazy var recentsScanQueue = DispatchQueue(label: "com.sintelia.dockdeck.recents-scan", qos: .utility)
     private var searchWorkItem: DispatchWorkItem?
     private var pendingSaveWorkItem: DispatchWorkItem?
     private var monitor: WorkspaceMonitor?
@@ -454,7 +459,7 @@ final class ShelfViewController: NSViewController, NSSearchFieldDelegate {
         // Filesystem enumeration off the main thread: the Downloads folder can
         // hold thousands of entries, and this runs on a timer.
         recentsScanInFlight = true
-        DispatchQueue.global(qos: .utility).async { [weak self] in
+        recentsScanQueue.async { [weak self] in
             guard let self else { return }
             var items: [ShelfItem] = []
             if showScreenshots { items += SmartSectionResolver.items(for: .screenshots, store: self.store, limit: limit) }

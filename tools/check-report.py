@@ -80,7 +80,16 @@ def main(path):
         state = shelf["state"]
         c.check(shelf["layoutViable"] is True, f"{slot}: layout is viable")
         c.check(shelf["isVisible"] is True, f"{slot}: window is visible")
-        c.check(shelf["occlusionVisible"] is True, f"{slot}: window server reports it on screen")
+        if mirrors:
+            # An auto-hiding Dock parks past the screen edge and the shelf
+            # mirrors it — including on a first run, where the grace period
+            # keeps it *presented* (not hidden) but still in the parked
+            # position. Off-screen occlusion is the design here, not a bug:
+            # the parked resting layout is the assertion that matters.
+            c.check(rect(shelf["collapsedFrame"]) == rect(shelf["frame"]),
+                    f"{slot}: parked with the auto-hidden Dock (resting layout)")
+        else:
+            c.check(shelf["occlusionVisible"] is True, f"{slot}: window server reports it on screen")
 
         cx, cy, cw, ch = rect(shelf["collapsedFrame"])
         fx, fy, fw, fh = rect(shelf["frame"])

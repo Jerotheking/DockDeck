@@ -126,10 +126,27 @@ xattr -cr "$APP" 2>/dev/null || true
 xattr -c "$APP" 2>/dev/null || true
 
 
-# Ad-hoc signature. Enough for Gatekeeper to run it locally after the quarantine
-# bit is cleared; it carries no identity and satisfies no distribution
-# requirement. sign.sh replaces it with a Developer ID signature.
-codesign --force --sign - --timestamp=none "$APP"
+# Signature. TCC grants (Accessibility) are keyed to the app's designated
+# requirement: a plain ad-hoc signature's requirement is its own cdhash, so
+# every rebuild minted a new hash and silently revoked the Accessibility
+# grant — the shelves then lost exact Dock tracking until the user re-granted.
+#
+# The fix without any keychain dance: ad-hoc signing with an *explicit*
+# requirement pinned to the bundle identifier. The DR becomes stable across
+# rebuilds, so one grant keeps working for every future build. (Trade-off,
+# accepted for a local development app: any binary signed with the same
+# identifier would satisfy the DR; a Developer ID identity is the answer for
+# distribution — sign.sh. Signing with a real identity here also hung the
+# build waiting on a keychain authorization prompt nobody could click.)
+#
+# Override with SIGN_IDENTITY=... if a real identity is wanted interactively.
+SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+REQUIREMENTS='=designated => identifier "com.sintelia.dockdeck"'
+if [[ "$SIGN_IDENTITY" == "-" ]]; then
+  codesign --force --sign - --timestamp=none --requirements "$REQUIREMENTS" "$APP"
+else
+  codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$APP"
+fi
 codesign --verify --strict "$APP"
 
 printf 'Built %s\n' "$APP"
@@ -137,7 +154,11 @@ printf 'Built %s\n' "$APP"
 printf '  version      %s (build %s)\n' "$VERSION" "$BUILD_NUMBER"
 printf '  target       arm64-apple-macosx%s\n' "$DEPLOYMENT_TARGET"
 printf '  swift        %s\n' "$(swiftc --version | head -1)"
-printf '  signature    ad-hoc (development build — not notarized, not distributable)\n'
+if [[ "$SIGN_IDENTITY" == "-" ]]; then
+  printf '  signature    ad-hoc, DR pinned to bundle id (Accessibility grant survives rebuilds)\n'
+else
+  printf '  signature    %s\n' "$SIGN_IDENTITY"
+fi
 
 if [[ "${1:-}" == "--install" ]]; then
   INSTALL_DIR="$HOME/Applications"
@@ -145,7 +166,11 @@ if [[ "${1:-}" == "--install" ]]; then
   rm -rf "$INSTALL_DIR/DockDeck.app"
   ditto "$APP" "$INSTALL_DIR/DockDeck.app"
   xattr -cr "$INSTALL_DIR/DockDeck.app" 2>/dev/null || true
-  codesign --force --sign - --timestamp=none "$INSTALL_DIR/DockDeck.app"
+  if [[ "$SIGN_IDENTITY" == "-" ]]; then
+    codesign --force --sign - --timestamp=none --requirements "$REQUIREMENTS" "$INSTALL_DIR/DockDeck.app"
+  else
+    codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$INSTALL_DIR/DockDeck.app"
+  fi
   codesign --verify --strict "$INSTALL_DIR/DockDeck.app"
   printf '  installed    %s\n' "$INSTALL_DIR/DockDeck.app"
 fi
