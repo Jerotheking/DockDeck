@@ -4,6 +4,19 @@
 
 First build of DockDeck that actually appears on screen.
 
+### Added — build 20: the notch shelf has real content (Phase 2)
+
+The open state stopped being an empty black slab. `NotchContentView` now hangs
+from the silhouette when it opens: a glass sheet with search, kind tabs with
+live counts (All / Files / Notes / Clips / Links), the newest eight items as
+click-to-open rows with kind icons and relative ages, and a context menu per
+row (Open, Reveal in Finder, Copy Path, Remove from Shelf). Opening notes and
+bookmarks resolves their text as a URL; the sheet refreshes from the store at
+every open, so content is never stale. Rows are frame-laid inside a flipped
+container — the first attempt used a required width-equality against the
+arranging stack and aborted in CoreAutoLayout (`mutuallyExclusiveConstraints`)
+on every open; manual layout is deterministic and crash-free.
+
 ### Fixed — build 18: the notch silhouette rendered as a perfectly transparent window
 
 The closed silhouette existed at the exact position (CGWindowList confirmed

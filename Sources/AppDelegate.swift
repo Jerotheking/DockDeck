@@ -18,6 +18,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var dragActivation: DragActivationMonitor?
     private var notchPanel: NotchPanel?
     private var notchController: NotchController?
+    /// Strong holder for the notch content's store bridge (its delegate is
+    /// weak, so an inline instance would die the moment it was assigned).
+    private var notchStoreBridge: NotchStoreBridge?
     private var didCleanUp = false
     /// Auto-hide stays disarmed until this instant. Hiding the shelves before
     /// the user has seen them reproduces, from their side, exactly the bug this
@@ -222,6 +225,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
               let measurement = NotchGeometry.Measurement.measureNotchedScreen() else { return }
         let panel = NotchPanel(measurement: measurement)
         let controller = NotchController(panel: panel)
+        let bridge = NotchStoreBridge(store: store!)
+        panel.notchContent.delegate = bridge
+        notchStoreBridge = bridge
+        panel.notchContent.onOpen = { item in
+            if item.path != nil { FinderActions.open(item) }
+            else if let text = item.text, let url = URL(string: text), url.scheme != nil {
+                NSWorkspace.shared.open(url)
+            }
+        }
         notchPanel = panel
         notchController = controller
         controller.start()

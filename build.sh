@@ -52,6 +52,7 @@ SOURCES=(
   NotchGeometry.swift
   NotchPanel.swift
   NotchController.swift
+  NotchContent.swift
   FinderActions.swift
   GlobalHotkey.swift
   MarkdownExport.swift

@@ -24,10 +24,9 @@ final class NotchPanel: NSPanel {
     /// The black silhouette chrome: a layer-backed view pinned to the window
     /// top, whose layer path is the morphing silhouette.
     private let chrome = NotchChromeView()
-    /// The sheet that slides in below the silhouette when open (Phase 2 will
-    /// mount the real shelf UI here; Phase 1 shows an empty glass sheet so
-    /// the morph can be judged on its own).
-    let sheetHost = NSView()
+    /// The real shelf content that appears in the open sheet: search, kind
+    /// tabs, and the newest items with their actions.
+    let notchContent = NotchContentView()
 
     private lazy var springs = NotchSpringBox(window: self)
     private var escMonitor: Any?
@@ -63,9 +62,9 @@ final class NotchPanel: NSPanel {
         chrome.frame = CGRect(x: 0, y: closed.height, width: closed.width, height: 0)
         contentView = chrome
 
-        sheetHost.wantsLayer = true
-        sheetHost.isHidden = true
-        chrome.addSubview(sheetHost)
+        notchContent.wantsLayer = true
+        notchContent.isHidden = true
+        chrome.addSubview(notchContent)
 
         applySilhouette(animated: false)
     }
@@ -134,17 +133,21 @@ final class NotchPanel: NSPanel {
     private func layoutChrome() {
         let bounds = chrome.bounds
         chrome.frame = bounds
-        sheetHost.frame = chrome.bounds
+        // The glass sheet fills the open panel's content area but stays *below*
+        // the silhouette's own height while closed, so the black lip reads as
+        // the notch's edge at every fraction of the morph.
         let contentHeight = max(0, bounds.height - NotchGeometry.shadowPadding)
         let fraction = NotchGeometry.morphFraction(
             contentHeight: contentHeight,
             closed: NotchGeometry.closedRect(measurement),
             open: NotchGeometry.openRect(measurement, depth: openDepth))
+        notchContent.frame = CGRect(x: 0, y: bounds.height - contentHeight,
+                                    width: bounds.width, height: contentHeight)
         chrome.apply(fraction: fraction,
                      topRadius: NotchGeometry.radii(fraction: fraction).top,
                      bottomRadius: NotchGeometry.radii(fraction: fraction).bottom)
-        sheetHost.isHidden = fraction < 0.02
-        sheetHost.alphaValue = fraction
+        notchContent.isHidden = fraction < 0.02
+        notchContent.alphaValue = fraction
     }
 
     /// The spring drives the window through setFrame — this override is the
@@ -161,6 +164,9 @@ final class NotchPanel: NSPanel {
         guard state != .open else { return }
         state = .open
         orderFrontRegardless()
+        // Content refreshes at open time — the delegate is asked again, so
+        // items are never stale no matter what changed while closed.
+        notchContent.prepareForDisplay()
         applySilhouette(animated: true)
         controller?.stateDidChange()
     }
